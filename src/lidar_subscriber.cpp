@@ -11,6 +11,7 @@
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/project_inliers.h>
 #include <pcl/surface/concave_hull.h>
+#include <Eigen/Dense>
 
 class FlatSurfaceSegmentation : public rclcpp::Node
 {
@@ -127,46 +128,117 @@ private:
         hull_pub_->publish(hull_msg);
         RCLCPP_INFO(this->get_logger(), "Published concave hull to /flat_surface_hull.");
 
-        // Step 8: Publish the Segmented Plane
-        sensor_msgs::msg::PointCloud2 output_msg;
-        pcl::toROSMsg(*plane_cloud, output_msg);
-        output_msg.header.frame_id = msg->header.frame_id;
-        output_msg.header.stamp = msg->header.stamp;
-        segmented_surface_pub_->publish(output_msg);
-        RCLCPP_INFO(this->get_logger(), "Published segmented flat surface to /flat_surface.");
-
-        // Optional: Publish a Marker for Visualization
-        publishMarker(coefficients);
+        // Step 8: Process Boundary Points
+        processHullPoints(cloud_hull, coefficients, msg);
     }
 
-    void publishMarker(const pcl::ModelCoefficients::Ptr &coefficients)
+    void processHullPoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull,
+                           const pcl::ModelCoefficients::Ptr &coefficients,
+                           const sensor_msgs::msg::PointCloud2::SharedPtr &msg)
     {
-        visualization_msgs::msg::Marker marker;
-        marker.header.frame_id = "base_link"; // Adjust if necessary
-        marker.header.stamp = this->now();
-        marker.ns = "plane";
-        marker.id = 0;
-        marker.type = visualization_msgs::msg::Marker::CUBE;
-        marker.action = visualization_msgs::msg::Marker::ADD;
+        // Sort boundary points
+        auto sorted_points = sortBoundaryPoints(cloud_hull);
+        RCLCPP_INFO(this->get_logger(), "Sorted %zu boundary points.", sorted_points.size());
 
-        // Define the plane's approximate position and orientation
-        marker.pose.position.x = coefficients->values[0];
-        marker.pose.position.y = coefficients->values[1];
-        marker.pose.position.z = coefficients->values[2];
-        marker.pose.orientation.w = 1.0;
+        // Simplify boundary (optional)
+        auto simplified_points = simplifyBoundary(sorted_points, 5); // Adjust step for simplification
+        RCLCPP_INFO(this->get_logger(), "Simplified boundary to %zu points.", simplified_points.size());
 
-        // Set the size and color of the marker
-        marker.scale.x = 1.0;
-        marker.scale.y = 1.0;
-        marker.scale.z = 0.01; // Thickness of the plane
-        marker.color.r = 0.0f;
-        marker.color.g = 1.0f;
-        marker.color.b = 0.0f;
-        marker.color.a = 0.5;
+        // Convert to ROS waypoints
+        std::vector<geometry_msgs::msg::Pose> waypoints;
+        for (const auto &point : simplified_points) {
+            geometry_msgs::msg::Pose pose;
+            pose.position.x = point.x;
+            pose.position.y = point.y;
+            pose.position.z = point.z;
 
-        marker_pub_->publish(marker);
-        RCLCPP_INFO(this->get_logger(), "Published marker for segmented plane.");
+            // Use plane coefficients for orientation
+            Eigen::Vector3f normal(coefficients->values[0], coefficients->values[1], coefficients->values[2]);
+            Eigen::Quaternionf q = Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::UnitZ(), normal.normalized());
+            pose.orientation.w = q.w();
+            pose.orientation.x = q.x();
+            pose.orientation.y = q.y();
+            pose.orientation.z = q.z();
+
+            waypoints.push_back(pose);
+        }
+
+        // Publish waypoints as a visualization marker
+        publishWaypoints(waypoints, msg->header.frame_id);
     }
+
+    std::vector<pcl::PointXYZ> sortBoundaryPoints(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cloud_hull)
+    {
+        Eigen::Vector3f centroid(0.0f, 0.0f, 0.0f);
+        for (const auto &point : cloud_hull->points) {
+            centroid += Eigen::Vector3f(point.x, point.y, point.z);
+        }
+        centroid /= cloud_hull->points.size();
+
+        std::vector<std::pair<float, pcl::PointXYZ>> polar_points;
+        for (const auto &point : cloud_hull->points) {
+            float angle = atan2(point.y - centroid.y(), point.x - centroid.x());
+            polar_points.emplace_back(angle, point);
+        }
+
+        std::sort(polar_points.begin(), polar_points.end(),
+                  [](const auto &a, const auto &b) { return a.first < b.first; });
+
+        std::vector<pcl::PointXYZ> sorted_points;
+        for (const auto &pair : polar_points) {
+            sorted_points.push_back(pair.second);
+        }
+
+        return sorted_points;
+    }
+
+    std::vector<pcl::PointXYZ> simplifyBoundary(const std::vector<pcl::PointXYZ> &points, int step)
+    {
+        std::vector<pcl::PointXYZ> simplified_points;
+        for (size_t i = 0; i < points.size(); i += step) {
+            simplified_points.push_back(points[i]);
+        }
+        return simplified_points;
+    }
+
+    void publishWaypoints(const std::vector<geometry_msgs::msg::Pose> &waypoints, const std::string &frame_id)
+    {
+        visualization_msgs::msg::Marker line_strip;
+        line_strip.header.frame_id = frame_id; // Use the input point cloud's frame
+        line_strip.header.stamp = this->now();
+        line_strip.ns = "boundary";
+        line_strip.id = 0;
+        line_strip.type = visualization_msgs::msg::Marker::LINE_STRIP;
+        line_strip.action = visualization_msgs::msg::Marker::ADD;
+
+        line_strip.scale.x = 0.01; // Line width
+        line_strip.color.r = 1.0f;
+        line_strip.color.g = 0.0f;
+        line_strip.color.b = 0.0f;
+        line_strip.color.a = 1.0f;
+
+        for (const auto &pose : waypoints) {
+            geometry_msgs::msg::Point p;
+            p.x = pose.position.x;
+            p.y = pose.position.y;
+            p.z = pose.position.z;
+            line_strip.points.push_back(p);
+        }
+
+        // Ensure the line strip is closed by adding the first point at the end
+        if (!waypoints.empty()) {
+            geometry_msgs::msg::Point first_point;
+            first_point.x = waypoints.front().position.x;
+            first_point.y = waypoints.front().position.y;
+            first_point.z = waypoints.front().position.z;
+            line_strip.points.push_back(first_point);
+        }
+
+        marker_pub_->publish(line_strip);
+        RCLCPP_INFO(this->get_logger(), "Published closed boundary waypoints as a line strip.");
+    }
+
+
 
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr segmented_surface_pub_;
