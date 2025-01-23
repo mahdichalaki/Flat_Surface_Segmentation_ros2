@@ -2,13 +2,17 @@
 
 This ROS2 package processes 3D point clouds to detect and segment flat surfaces. It uses **PCL (Point Cloud Library)** for point cloud processing and publishes the detected planes, boundary markers, and waypoints for robotic applications.
 
+<p align="center">
+  <img src="Segmentation.jpeg" alt="Segmentation" width="500">
+</p>
+
 ## Features
 
 - Subscribes to a point cloud topic (`/scan/points`) to receive input data.
 - Detects flat surfaces using RANSAC-based plane segmentation.
 - Extracts and simplifies the boundary of the segmented planes.
 - Publishes:
-  - Segmented planes as a **PointCloud2** message (`/flat_surface_hull`).
+  - Segmented planes as a PointCloud2 message (`/flat_surface_hull`).
   - Simplified boundary markers for visualization (`/segmentation_marker`).
   - Waypoints for robotic navigation or end-effector alignment (`/flat_surface_waypoints`).
 - Includes services to:
@@ -35,7 +39,7 @@ This ROS2 package processes 3D point clouds to detect and segment flat surfaces.
 
 This package depends on the following libraries and ROS2 packages:
 
-- **ROS2 Humble** or later.
+- ROS2 Humble or later.
 - `pcl_ros` and `pcl_conversions` for PCL integration.
 - `std_srvs`, `sensor_msgs`, `visualization_msgs`, and `geometry_msgs`.
 
